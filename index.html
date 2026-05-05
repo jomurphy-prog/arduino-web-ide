@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Arduino Web IDE</title>
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 20px; background: #1e1e1e; color: #fff; margin: 0; }
+    .header { max-width: 1000px; margin: 0 auto 15px auto; display: flex; justify-content: space-between; align-items: center; }
+    button { padding: 10px 20px; font-size: 16px; cursor: pointer; color: white; border: none; border-radius: 4px; font-weight: bold; }
+    button:disabled { background: #555; cursor: not-allowed; color: #888; }
+    
+    #compileBtn { background: #00979D; } /* Official Arduino Teal */
+    #uploadBtn { background: #E47128; }  /* Orange */
+    #status { color: #aaa; margin-left: 15px; font-family: monospace; }
+    
+    /* The container where our code editor will live */
+    #editorContainer { height: 500px; max-width: 1000px; margin: 0 auto; border: 1px solid #333; border-radius: 4px; overflow: hidden; }
+    
+    /* The console output at the bottom */
+    #consoleOutput { max-width: 980px; margin: 15px auto; background: #000; color: #0f0; padding: 10px; height: 150px; overflow-y: auto; font-family: monospace; border: 1px solid #333; border-radius: 4px; }
+  </style>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.38.0/min/vs/loader.min.js"></script>
+</head>
+<body>
+
+<div class="header">
+    <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+      <button id="compileBtn">⚙️ Compile Code</button>
+      <button id="uploadBtn" disabled>🔌 Upload to Arduino</button>
+      
+      <button id="saveBtn" style="background: #8e44ad; margin-left: 15px;">💾 Save Sketch</button>
+      <button id="loadBtn" style="background: #2980b9;">📂 Load Sketch</button>
+      <input type="file" id="loadInput" accept=".ino,.cpp,.txt" style="display: none;">
+      
+      <button id="renameBtn" style="background: #6c757d; margin-left: 15px;">✏️ Rename</button>
+      <span id="fileNameDisplay" style="font-weight: bold; color: #00979D;">MySketch.ino</span>
+      
+      <span id="status">Status: Ready</span>
+    </div>
+  </div>
+
+  <div id="editorContainer"></div>
+
+  <div id="consoleOutput">Console output will appear here...</div>
+
+  <script>
+    // --- MONACO EDITOR SETUP ---
+    let editor; // Global variable to hold our editor instance
+
+    require.config({ paths: { 'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.38.0/min/vs' }});
+    require(['vs/editor/editor.main'], function() {
+      // Initialize the editor inside our container
+      editor = monaco.editor.create(document.getElementById('editorContainer'), {
+        value: "void setup() {\n  pinMode(13, OUTPUT);\n}\n\nvoid loop() {\n  digitalWrite(13, HIGH);\n  delay(1000);\n  digitalWrite(13, LOW);\n  delay(1000);\n}",
+        language: 'cpp',
+        theme: 'vs-dark',
+        automaticLayout: true,
+        minimap: { enabled: false }, // Hides the tiny code map on the right
+        fontSize: 16
+      });
+    });
+
+    // --- COMPILER LOGIC ---
+    const compileBtn = document.getElementById('compileBtn');
+    const statusDiv = document.getElementById('status');
+    const consoleOutput = document.getElementById('consoleOutput');
+
+    // Global variable to store our compiled hex code so the Upload button can use it later
+    let compiledHex = ""; 
+
+    compileBtn.addEventListener('click', async () => {
+      // Grab the current text directly from the Monaco Editor
+      const cppCode = editor.getValue();
+      
+      statusDiv.innerText = "Status: Compiling...";
+      statusDiv.style.color = "#00979D";
+      consoleOutput.innerText = "Sending code to Python server...\n";
+      compileBtn.disabled = true;
+
+      try {
+        // Send to your local Python Server
+        const response = await fetch("https://arduino-cloud-compiler.onrender.com/compile", {
+          method: "POST",
+          body: cppCode
+        });
+
+        const data = await response.text();
+
+        if (response.ok) {
+          statusDiv.innerText = "Status: Compile Successful!";
+          statusDiv.style.color = "#28a745";
+          consoleOutput.innerText += "\nCompile Success! HEX size: " + data.length + " bytes.\n";
+          
+          // Save the hex data for the next phase!
+          compiledHex = data; 
+          document.getElementById('uploadBtn').disabled = false; // We will uncomment this next!
+
+        } else {
+          statusDiv.innerText = "Status: Syntax Error";
+          statusDiv.style.color = "#dc3545";
+          consoleOutput.innerText += "\n--- ERROR ---\n" + data;
+        }
+
+      } catch (err) {
+        statusDiv.innerText = "Status: Server Offline";
+        statusDiv.style.color = "#dc3545";
+        consoleOutput.innerText += "\nError: Could not connect to Python server. Is server.py running?";
+      }
+      
+      compileBtn.disabled = false;
+    });
+
+// --- FILE NAMING LOGIC ---
+    let currentFileName = "MySketch";
+    const renameBtn = document.getElementById('renameBtn');
+    const fileNameDisplay = document.getElementById('fileNameDisplay');
+
+    renameBtn.addEventListener('click', () => {
+      let userInput = prompt("Enter a name for your sketch (no spaces):", currentFileName);
+      if (userInput !== null && userInput.trim() !== "") {
+        // Remove spaces and special characters to make it safe for file saving
+        let safeName = userInput.replace(/[^a-zA-Z0-9_-]/g, '');
+        if (safeName === "") safeName = "MySketch";
+        
+        currentFileName = safeName;
+        fileNameDisplay.innerText = currentFileName + ".ino";
+      }
+    });
+  // --- SAVE & LOAD SKETCH LOGIC ---
+    const saveBtn = document.getElementById('saveBtn');
+    const loadBtn = document.getElementById('loadBtn');
+    const loadInput = document.getElementById('loadInput');
+
+    // SAVE SKETCH
+    saveBtn.addEventListener('click', () => {
+      try {
+        // 1. Grab the raw text from the Monaco Editor
+        const code = editor.getValue();
+
+        // 2. Create a virtual file (Blob)
+        const blob = new Blob([code], { type: "text/plain" });
+        const url = URL.createObjectURL(blob);
+
+        // 3. Trigger the download as an Arduino .ino file
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = currentFileName + ".ino";
+        document.body.appendChild(a);
+        a.click();
+        
+        // 4. Clean up
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        
+        statusDiv.innerText = "Status: Sketch Saved Locally!";
+        statusDiv.style.color = "#28a745";
+      } catch (err) {
+        statusDiv.innerText = "Status: Failed to save.";
+        statusDiv.style.color = "#dc3545";
+        console.error(err);
+      }
+    });
+
+    // LOAD SKETCH (Trigger the hidden file input)
+    loadBtn.addEventListener('click', () => {
+      loadInput.click();
+    });
+
+    // LOAD SKETCH (Process the file once selected)
+    loadInput.addEventListener('change', (event) => {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      
+      // What to do when the file finishes reading:
+      reader.onload = function(e) {
+        try {
+          const uploadedCode = e.target.result;
+          
+          // Inject the uploaded text directly into the Monaco Editor
+          editor.setValue(uploadedCode);
+	// Extract the filename without the extension and update the UI
+          let cleanName = file.name.replace(/\.[^/.]+$/, "");
+          currentFileName = cleanName;
+          fileNameDisplay.innerText = currentFileName + ".ino";
+          
+          statusDiv.innerText = "Status: Sketch Loaded!";
+          statusDiv.style.color = "#28a745";
+          consoleOutput.innerText += `\nSuccessfully loaded ${file.name}`;
+        } catch (err) {
+          statusDiv.innerText = "Status: Error reading file.";
+          statusDiv.style.color = "#dc3545";
+          console.error(err);
+        }
+      };
+      
+      // Read the file as plain text
+      reader.readAsText(file);
+      
+      // Reset the input so they can load the same file again if needed
+      event.target.value = '';
+    });
+
+  // --- 1. INTEL HEX PARSER ---
+    function parseHex(hexStr) {
+      let bin = new Uint8Array(32768); // Uno has 32KB of flash memory
+      let maxAddr = 0;
+      let lines = hexStr.split('\n');
+      
+      for (let line of lines) {
+        if (line[0] !== ':') continue;
+        let len = parseInt(line.substr(1, 2), 16);
+        let addr = parseInt(line.substr(3, 4), 16);
+        let type = parseInt(line.substr(7, 2), 16);
+        
+        if (type === 0) { // If it is a Data record
+          for (let i = 0; i < len; i++) {
+            bin[addr + i] = parseInt(line.substr(9 + i * 2, 2), 16);
+          }
+          if (addr + len > maxAddr) maxAddr = addr + len;
+        }
+      }
+      // The Uno requires pages to be exactly 128 bytes long
+      let paddedSize = Math.ceil(maxAddr / 128) * 128;
+      return bin.slice(0, paddedSize);
+    }
+
+    // --- 2. WEB SERIAL UPLOADER ---
+    const uploadBtn = document.getElementById('uploadBtn');
+
+    uploadBtn.addEventListener('click', async () => {
+      if (!compiledHex) {
+        alert("Please compile the code first!");
+        return;
+      }
+      
+      statusDiv.innerText = "Status: Selecting Port...";
+      
+      try {
+        // 1. Request the COM Port
+        const port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 115200 }); // The Uno's bootloader speaks at 115200 baud
+        
+        statusDiv.innerText = "Status: Flashing Arduino...";
+        uploadBtn.disabled = true;
+
+        // 2. Hardware Reset (Toggle DTR to wake the bootloader)
+        await port.setSignals({ dataTerminalReady: false, requestToSend: false });
+        await new Promise(r => setTimeout(r, 100));
+        await port.setSignals({ dataTerminalReady: true, requestToSend: true });
+        await new Promise(r => setTimeout(r, 250)); 
+
+        const writer = port.writable.getWriter();
+        const reader = port.readable.getReader();
+
+        // Helper function to send commands and wait for a reply
+        async function sendCmd(cmd, expectLen) {
+          await writer.write(new Uint8Array(cmd));
+          let resp = new Uint8Array(expectLen);
+          let offset = 0;
+          while(offset < expectLen) {
+            const { value } = await reader.read();
+            if (value) {
+              let take = Math.min(value.length, expectLen - offset);
+              resp.set(value.slice(0, take), offset);
+              offset += take;
+            }
+          }
+          return resp;
+        }
+
+        consoleOutput.innerText += "\nSyncing with bootloader...";
+        
+        // 3. STK500 Handshake: Sync and Enter Programming Mode
+        await sendCmd([0x30, 0x20], 2); // Get Sync
+        await sendCmd([0x50, 0x20], 2); // Enter Prog Mode
+
+        // 4. Parse the HEX and Flash it Page by Page
+        const bin = parseHex(compiledHex);
+        const pageSize = 128;
+        consoleOutput.innerText += `\nFlashing ${bin.length} bytes...`;
+
+        for (let i = 0; i < bin.length; i += pageSize) {
+          // Load Address (Address is in Words, so divide by 2)
+          let wordAddr = i / 2;
+          await sendCmd([0x55, wordAddr & 0xFF, (wordAddr >> 8) & 0xFF, 0x20], 2);
+          
+          // Write Page
+          let payload = new Uint8Array(4 + pageSize + 1);
+          payload.set([0x64, 0x00, pageSize, 0x46]); // 0x64=Write, 0x46='F' (Flash)
+          payload.set(bin.slice(i, i + pageSize), 4); // Inject 128 bytes
+          payload[payload.length - 1] = 0x20;         // Sync byte at the end
+          
+          await sendCmd(payload, 2);
+        }
+
+        // 5. Leave Programming Mode
+        await sendCmd([0x51, 0x20], 2);
+        consoleOutput.innerText += "\nFlash Complete! Arduino is rebooting.";
+        statusDiv.innerText = "Status: Upload Successful!";
+        statusDiv.style.color = "#28a745";
+
+        // Clean up and close port
+        reader.releaseLock();
+        writer.releaseLock();
+        await port.close();
+
+      } catch (err) {
+        statusDiv.innerText = "Status: Upload Failed";
+        statusDiv.style.color = "#dc3545";
+        consoleOutput.innerText += "\nUpload Error: " + err.message;
+        console.error(err);
+      }
+      
+      uploadBtn.disabled = false;
+    });
+
+  </script>
+</body>
+</html>
